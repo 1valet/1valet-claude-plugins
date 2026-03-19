@@ -13,7 +13,7 @@ Query your buildings, amenities, bookings, suites, occupants, and access control
 Add this marketplace to Claude Code:
 
 ```
-/plugin marketplace add 1valet/claude-plugins
+/plugin marketplace add 1valet/1valet-claude-plugins
 ```
 
 Then install the plugin:
