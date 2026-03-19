@@ -1,0 +1,16 @@
+# Credentials — never commit these
+credentials/
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc

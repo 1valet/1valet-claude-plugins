@@ -1,0 +1,12 @@
+{
+  "name": "1valet-api",
+  "description": "Connect to the 1VALET Public API to query your buildings, amenities, bookings, suites, occupants, and access control data using your provided credentials.",
+  "version": "1.0.0",
+  "author": {
+    "name": "1VALET",
+    "email": "support@1valet.com"
+  },
+  "homepage": "https://api.1valet.com",
+  "license": "MIT",
+  "keywords": ["1valet", "buildings", "amenities", "bookings", "access-control", "property-management"]
+}

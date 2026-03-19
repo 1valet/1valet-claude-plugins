@@ -1,0 +1,21 @@
+{
+  "name": "1valet-plugins",
+  "owner": {
+    "name": "1VALET",
+    "email": "support@1valet.com"
+  },
+  "metadata": {
+    "description": "Official 1VALET plugins for Claude — access your building, amenity, and access control data directly from Claude.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "1valet-api",
+      "source": "./plugins/1valet-api",
+      "description": "Connect to the 1VALET Public API to query buildings, amenities, bookings, suites, occupants, and access control data.",
+      "version": "1.0.0",
+      "category": "integrations",
+      "tags": ["1valet", "property-management", "buildings", "amenities", "access-control"]
+    }
+  ]
+}
