@@ -38,42 +38,30 @@ The skill finds your `.env` file using this priority:
 2. **The mounted workspace** — scan the mounted directory for a `credentials/` subfolder containing a `.env` file
 3. **Ask the user** — if neither of the above works, use `request_cowork_directory` to ask the user to select their credentials folder
 
-To search for credentials in the mounted workspace, run:
-```bash
-find /sessions/*/mnt -maxdepth 3 -name ".env" -path "*/credentials/*" 2>/dev/null | head -1
-```
-If that returns a result, use the parent directory as the credentials dir. If not, prompt the user.
+Credential discovery is handled automatically by the `auth.sh` script — do not search for or read credential files directly.
 
 ## Authentication Flow
 
-### Step 1: Find and load credentials
+All authentication and API requests go through `scripts/auth.sh`. Never use raw curl commands with credentials or tokens. The script requires only `bash` and `curl` — no Python or other dependencies.
 
-Follow the priority order above to locate the credentials directory. Read the `.env` file and parse the CLIENT_ID and CLIENT_SECRET values.
-
-### Step 2: Get an OAuth2 token
-
-Use these constants:
-- **Token URL**: `https://id.1valetbas.com/connect/token`
-- **Scopes**: `public_api public_api.common_data.read public_api.portfolio_manager.read`
+### Step 1: Authenticate
 
 ```bash
-curl -s -X POST "https://id.1valetbas.com/connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=$CLIENT_ID" \
-  -d "client_secret=$CLIENT_SECRET" \
-  -d "scope=public_api public_api.common_data.read public_api.portfolio_manager.read"
+bash scripts/auth.sh auth [credentials_dir]
 ```
 
-Parse the JSON response to extract `access_token`. Tokens are valid for 3600 seconds (1 hour).
+This discovers credentials, obtains an OAuth2 token, and stores it securely. No credentials or tokens are printed to the console.
 
-### Step 3: Make API calls
+### Step 2: Make API calls
 
 ```bash
-curl -s "https://api.1valet.com/v1/<endpoint>" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept: application/json"
+bash scripts/auth.sh request /v1/buildings
+bash scripts/auth.sh request /v1/buildings/{id}/suites
+bash scripts/auth.sh request /v1/amenities/buildings/{id}/bookings?from=2026-01-01&to=2026-03-19
+bash scripts/auth.sh request /v1/buildings/{id}/occupants
 ```
+
+The script handles token lifecycle automatically — if the token is missing or expired, it re-authenticates before making the request. Only the API response JSON is printed to stdout.
 
 ## API Reference
 
@@ -106,7 +94,7 @@ Base URL: `https://api.1valet.com`
 2. For each building: `GET /v1/amenities/buildings/{id}/bookings`
 3. Aggregate results
 
-When pulling data that requires iterating over buildings (e.g., bookings for all buildings), use `concurrent.futures.ThreadPoolExecutor` with 15-25 workers for performance.
+When pulling data that requires iterating over buildings (e.g., bookings for all buildings), run multiple `auth.sh request` calls in parallel using background processes or xargs for performance.
 
 **List all buildings:**
 1. `GET /v1/buildings`
@@ -116,7 +104,9 @@ When pulling data that requires iterating over buildings (e.g., bookings for all
 
 ## Security Notes
 
+- All credential and token handling is encapsulated in `auth.sh` — never use raw curl with credentials or tokens
 - Credentials are read from disk into memory only — never written to new files or logged
-- OAuth2 tokens are stored in `/tmp/.api_token` for the session duration only
-- The token file is overwritten each time a new token is acquired
+- OAuth2 tokens are stored in `/tmp/.api_token` with owner-only permissions (0600)
+- The token file uses JSON format with expiry tracking and is overwritten on each new token
+- Error messages are sanitized — no credentials or response bodies are exposed in error output
 - Never include credentials or tokens in conversation output
