@@ -274,12 +274,33 @@ function tryListen(port) {
     });
 }
 
-async function startLoopbackServer() {
-    // IDS registers a fixed port range on the ClaudePluginUserDelegated
-    // client (Duende 7.4.3 doesn't support wildcard ports). Scan in order
-    // and use the first free port; fail gracefully if all are busy.
-    const failures = [];
+function buildCandidatePorts() {
+    // IDS registers a fixed range of RedirectUris (http://127.0.0.1:51000..51010/callback).
+    // Any port outside that range makes IDS return invalid_redirect_uri, so we must bind
+    // within it. If ONEVALET_OAUTH_PORT is set, try it first; if it's outside the range,
+    // fail fast rather than silently ignoring it.
+    const raw = process.env.ONEVALET_OAUTH_PORT;
+    const candidates = [];
+    if (raw !== undefined && raw !== '') {
+        const preferred = Number.parseInt(raw, 10);
+        if (!Number.isInteger(preferred) || preferred < REDIRECT_PORT_START || preferred > REDIRECT_PORT_END) {
+            throw new Error(
+                `ONEVALET_OAUTH_PORT=${raw} is outside the registered range ${REDIRECT_PORT_START}-${REDIRECT_PORT_END}. ` +
+                    `Re-register the port on the IDS client or pick a value in range.`
+            );
+        }
+        candidates.push(preferred);
+    }
     for (let port = REDIRECT_PORT_START; port <= REDIRECT_PORT_END; port++) {
+        if (!candidates.includes(port)) candidates.push(port);
+    }
+    return candidates;
+}
+
+async function startLoopbackServer() {
+    const candidates = buildCandidatePorts();
+    const failures = [];
+    for (const port of candidates) {
         const result = await tryListen(port);
         if (result.server) {
             return { server: result.server, port: result.port };
@@ -287,8 +308,9 @@ async function startLoopbackServer() {
         failures.push(`${port}: ${result.error && result.error.code ? result.error.code : 'unknown'}`);
     }
     throw new Error(
-        `Could not bind any loopback port in ${REDIRECT_PORT_START}-${REDIRECT_PORT_END}. ` +
-            `All ports were in use. Free one of them and retry. Details: ${failures.join(', ')}`
+        `All loopback ports ${REDIRECT_PORT_START}-${REDIRECT_PORT_END} are in use. ` +
+            `Close the other app using one of them, or set ONEVALET_OAUTH_PORT to a specific free port in that range. ` +
+            `Details: ${failures.join(', ')}`
     );
 }
 
