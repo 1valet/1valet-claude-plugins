@@ -21,6 +21,8 @@ TOKEN_URL="https://id.1valetbas.com/connect/token"
 SCOPES="public_api public_api.common_data.read public_api.portfolio_manager.read"
 API_BASE="https://api.1valet.com"
 TOKEN_FILE="/tmp/.api_token"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OAUTH_JS="${SCRIPT_DIR}/oauth.js"
 
 # Temp file for curl responses (cleaned up on exit)
 TMPFILE=""
@@ -134,6 +136,45 @@ load_credentials() {
     fi
 }
 
+# Non-fatal variant of load_credentials used by auto-detection. Populates
+# _CLIENT_ID / _CLIENT_SECRET and returns 0 on success. Returns 1 if no
+# .env can be located or if either variable is missing/blank — the caller
+# is expected to fall back to user-delegated (oauth.js).
+try_load_client_credentials() {
+    local creds_dir="${1:-}"
+
+    if [[ -z "$creds_dir" ]]; then
+        creds_dir="$(find_credentials_dir 2>/dev/null)" || return 1
+    fi
+
+    local env_file="${creds_dir}/.env"
+    [[ -f "$env_file" ]] || return 1
+
+    local line key value cid="" csecret=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            continue
+        fi
+        if [[ "$line" == *"="* ]]; then
+            key="${line%%=*}"
+            value="${line#*=}"
+            key="$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            case "$key" in
+                CLIENT_ID) cid="$value" ;;
+                CLIENT_SECRET) csecret="$value" ;;
+            esac
+        fi
+    done < "$env_file"
+
+    [[ -n "$cid" && -n "$csecret" ]] || return 1
+
+    _CLIENT_ID="$cid"
+    _CLIENT_SECRET="$csecret"
+    return 0
+}
+
 # --- Token management ---
 
 get_token() {
@@ -208,12 +249,62 @@ load_saved_token() {
     return 0
 }
 
+# --- User-delegated (Authorization Code + PKCE) via oauth.js ---
+#
+# oauth.js manages its own token cache at ~/.config/1valet-plugin/tokens.json,
+# so this function delegates to it unconditionally — the JS helper decides
+# whether to use the cached access token, refresh, or launch the browser.
+
+get_user_delegated_token() {
+    if [[ ! -f "$OAUTH_JS" ]]; then
+        echo "Error: oauth.js not found at ${OAUTH_JS}." >&2
+        echo "The plugin install may be incomplete — reinstall via /plugin install 1valet-api@1valet-plugins." >&2
+        exit 1
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        echo "Error: Node.js is required for user-delegated sign-in but was not found on PATH." >&2
+        echo "Install Node.js (>=14) or provide CLIENT_ID/CLIENT_SECRET via a credentials/.env file for client_credentials mode." >&2
+        exit 1
+    fi
+
+    local token
+    token="$(node "$OAUTH_JS")" || {
+        echo "Error: User-delegated sign-in failed." >&2
+        exit 1
+    }
+    if [[ -z "$token" ]]; then
+        echo "Error: oauth.js returned an empty token." >&2
+        exit 1
+    fi
+    echo "$token"
+}
+
+# Determine which auth mode to use. If the caller supplied a creds_dir or
+# one can be auto-discovered AND it contains both CLIENT_ID and CLIENT_SECRET,
+# we stay on the existing client_credentials path. Otherwise fall back to
+# user-delegated. Sets _AUTH_MODE to "client_credentials" or "user_delegated".
+resolve_auth_mode() {
+    local creds_dir="${1:-}"
+    if try_load_client_credentials "$creds_dir"; then
+        _AUTH_MODE="client_credentials"
+    else
+        _AUTH_MODE="user_delegated"
+    fi
+}
+
 # --- Auth command ---
 
 cmd_auth() {
     local creds_dir="${1:-}"
-    load_credentials "$creds_dir"
-    get_token "$_CLIENT_ID" "$_CLIENT_SECRET"
+    resolve_auth_mode "$creds_dir"
+    if [[ "$_AUTH_MODE" == "client_credentials" ]]; then
+        get_token "$_CLIENT_ID" "$_CLIENT_SECRET"
+    else
+        # User-delegated caches inside oauth.js; just prime it.
+        get_user_delegated_token >/dev/null
+        echo "Signed in (user-delegated)." >&2
+    fi
 }
 
 # --- Ensure valid token ---
@@ -222,13 +313,22 @@ ensure_token() {
     local creds_dir="${1:-}"
     local token
 
+    resolve_auth_mode "$creds_dir"
+
+    if [[ "$_AUTH_MODE" == "user_delegated" ]]; then
+        # oauth.js owns its own cache — no need to consult /tmp/.api_token.
+        token="$(get_user_delegated_token)"
+        echo "$token"
+        return 0
+    fi
+
     token="$(load_saved_token 2>/dev/null)" && {
         echo "$token"
         return 0
     }
 
     echo "No valid token found, authenticating..." >&2
-    cmd_auth "$creds_dir"
+    get_token "$_CLIENT_ID" "$_CLIENT_SECRET"
 
     token="$(load_saved_token)" || {
         echo "Error: Failed to obtain a valid token." >&2
@@ -302,6 +402,19 @@ cmd_request() {
 
 # --- Main ---
 
+cmd_logout() {
+    # Clear user-delegated tokens (if any). The client_credentials cache at
+    # /tmp/.api_token is short-lived (1h) and ephemeral, but remove it too
+    # for symmetry so "logout" really means "drop every cached token".
+    if [[ -f "$OAUTH_JS" ]] && command -v node >/dev/null 2>&1; then
+        node "$OAUTH_JS" --logout >&2 || true
+    fi
+    if [[ -f "$TOKEN_FILE" ]]; then
+        rm -f "$TOKEN_FILE"
+        echo "Removed client_credentials token cache." >&2
+    fi
+}
+
 main() {
     local command="${1:-}"
 
@@ -313,6 +426,9 @@ main() {
         request)
             shift
             cmd_request "$@"
+            ;;
+        logout)
+            cmd_logout
             ;;
         "")
             # Backward compat: no subcommand defaults to auth
@@ -326,6 +442,7 @@ main() {
                 echo "Usage:" >&2
                 echo "  bash auth.sh auth [credentials_dir]" >&2
                 echo "  bash auth.sh request <endpoint> [--method GET] [--data '{}']" >&2
+                echo "  bash auth.sh logout" >&2
                 exit 1
             fi
             ;;
