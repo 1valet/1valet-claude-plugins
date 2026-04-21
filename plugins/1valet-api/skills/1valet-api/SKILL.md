@@ -1,56 +1,76 @@
 ---
 name: 1valet-api
 description: |
-  Connect to the 1VALET Public API to query your buildings, amenities, bookings, suites, occupants, and access control data. Use this skill whenever the user asks about their buildings, amenities, bookings, suites, occupants, access doors/cards, or wants reports and analysis from the 1VALET platform. This skill handles OAuth2 authentication automatically using locally stored credentials.
+  Connect to the 1VALET Public API to query your buildings, amenities, bookings, suites, occupants, and access control data. Use this skill whenever the user asks about their buildings, amenities, bookings, suites, occupants, access doors/cards, or wants reports and analysis from the 1VALET platform. Sign-in is handled automatically — by default Claude opens a browser for the user to sign in to 1VALET once; client_credentials via a `.env` file is still supported for automation and service accounts.
 ---
 
 # 1VALET API Skill
 
 This skill provides authenticated access to the 1VALET Public API for your organization's buildings and data.
 
-## Setup
+## Authentication modes
 
-Before using this skill, you need a credentials file containing the CLIENT_ID and CLIENT_SECRET provided by 1VALET.
+The skill supports two modes and picks one automatically at runtime.
 
-Create a file called `.env` inside a `credentials/` folder anywhere on your machine:
+### Default: user-delegated sign-in (browser + PKCE)
 
+The first time you run the skill, Claude opens your default browser to `https://id.1valetbas.com` so you can sign in with your real 1VALET account — the same credentials you use for the 1VALET admin portal, with 2FA and SSO applied. After you consent, the browser redirects to a short-lived local listener, a token is cached on your machine, and subsequent requests are silent.
+
+- OAuth2 **Authorization Code** flow with **PKCE** (RFC 7636) — no client secret on disk.
+- IDS client id: `ClaudePluginUserDelegated` (you don't need to configure this).
+- Scopes: `openid profile offline_access role public_api.user.portfolio_manager.read public_api.user.common_data.read` — **read-only** in phase 1. Write endpoints require the client_credentials mode below.
+- Data returned is scoped by your real `BasUser` permissions (`CustomerAdministrator` or `BasUserToBuilding`), so you only see buildings you already have access to in the portal.
+- Tokens are cached at `~/.config/1valet-plugin/tokens.json` (directory `0700`, file `0600`). The refresh token rotates silently.
+- When your assignments change in the portal, the next token refresh will reflect them; deactivated users lose access at the next refresh.
+
+**If the browser does not open automatically**, the script prints the sign-in URL to the terminal — copy it into any browser signed in to your 1VALET account.
+
+**To sign out locally**, run:
+
+```bash
+bash scripts/auth.sh logout
 ```
-credentials/
-└── .env
-```
 
-The `.env` file contains just two lines:
+That deletes the cached tokens; the next request will prompt you to sign in again.
+
+### Fallback: client_credentials (automation / service accounts)
+
+For integrators, CI jobs, or users who prefer a long-lived credential, the existing `.env` flow is unchanged.
+
+Create a `credentials/` folder anywhere on your machine with a `.env` file containing two lines:
 
 ```
 CLIENT_ID=public_api_<your-uuid>
 CLIENT_SECRET=<your-secret>
 ```
 
-Then, when you start a Cowork session, select the folder that contains your `credentials/` directory (e.g., your Documents folder). The skill will find it automatically.
+Then either select that folder when starting a Cowork session, or set `ONEVALET_CREDENTIALS_DIR` to point directly at it.
 
-Alternatively, set the `ONEVALET_CREDENTIALS_DIR` environment variable to point directly at your `credentials/` folder.
+### Which mode does the skill use?
 
-## Locating Credentials
+`auth.sh` resolves the mode on every call:
 
-The skill finds your `.env` file using this priority:
+1. If a `credentials/.env` is found (via `ONEVALET_CREDENTIALS_DIR`, the current working directory, or a mounted folder) **and** it contains both `CLIENT_ID` and `CLIENT_SECRET` → **client_credentials** (backward compatible).
+2. Otherwise → **user-delegated** (browser sign-in via `oauth.js`).
 
-1. **Environment variable `ONEVALET_CREDENTIALS_DIR`** — if set, use that path directly
-2. **The mounted workspace** — scan the mounted directory for a `credentials/` subfolder containing a `.env` file
-3. **Ask the user** — if neither of the above works, use `request_cowork_directory` to ask the user to select their credentials folder
+Credential and token handling is fully encapsulated in `scripts/auth.sh` and `scripts/oauth.js`. Never read credential files directly or call `curl` with credentials yourself.
 
-Credential discovery is handled automatically by the `auth.sh` script — do not search for or read credential files directly.
+## Usage
 
-## Authentication Flow
-
-All authentication and API requests go through `scripts/auth.sh`. Never use raw curl commands with credentials or tokens. The script requires only `bash` and `curl` — no Python or other dependencies.
-
-### Step 1: Authenticate
+### Step 1: Authenticate (first time only)
 
 ```bash
-bash scripts/auth.sh auth [credentials_dir]
+bash scripts/auth.sh auth
 ```
 
-This discovers credentials, obtains an OAuth2 token, and stores it securely. No credentials or tokens are printed to the console.
+- User-delegated mode: opens the browser and caches tokens. No prompts on subsequent runs until the refresh token expires (30 days sliding).
+- Client_credentials mode: acquires a token and caches it in `/tmp/.api_token`.
+
+You can pass an explicit credentials directory to force client_credentials:
+
+```bash
+bash scripts/auth.sh auth /path/to/credentials
+```
 
 ### Step 2: Make API calls
 
@@ -61,7 +81,7 @@ bash scripts/auth.sh request /v1/amenities/buildings/{id}/bookings?from=2026-01-
 bash scripts/auth.sh request /v1/buildings/{id}/occupants
 ```
 
-The script handles token lifecycle automatically — if the token is missing or expired, it re-authenticates before making the request. Only the API response JSON is printed to stdout.
+The script handles token lifecycle automatically — if no valid token exists it re-authenticates (silently in user-delegated mode when a refresh token is present). Only the API response JSON is printed to stdout.
 
 ## API Reference
 
@@ -89,7 +109,9 @@ Base URL: `https://api.1valet.com`
 | `/v1/buildings/{id}/parcels` | GET | Parcels |
 | `/v1/buildings/{id}/vehicles` | GET | Vehicles |
 | `/v1/localities` | GET | All localities |
-| `/v1/webhooks` | GET/POST | Manage webhooks |
+| `/v1/webhooks` | GET/POST | Manage webhooks (client_credentials only) |
+
+> **Phase 1 user-delegated scope:** only the building and amenity read endpoints are available when signed in via the browser. Access control, parking, write endpoints, and webhook management still require client_credentials.
 
 ### Building Details Endpoints (New in v1.1)
 
@@ -168,11 +190,18 @@ When pulling data that requires iterating over buildings (e.g., bookings for all
 **Get suites for a building:**
 1. `GET /v1/buildings/{id}/suites`
 
+## Troubleshooting
+
+- **Browser did not open**: the sign-in URL is printed to the terminal — copy it into any browser.
+- **"Could not bind any loopback port in 51000-51010"**: the sign-in listener uses a fixed port range registered with IDS. Something else on your machine is holding all 11 ports — close whatever is using them (the error message lists the offending port codes) and retry.
+- **"Node.js not found"**: user-delegated mode requires Node.js 14+ on `PATH`. Either install Node, or provide a `credentials/.env` to use client_credentials mode.
+- **"Token exchange failed"**: usually means the IDS client has not been seeded yet on the environment you're hitting, or your 1VALET account does not have permissions. Check with your 1VALET admin.
+- **"Forbidden" on a specific building**: your user account doesn't have a permission for that building. Phase 1 user-delegated mode is read-only; write calls will also return 403.
+
 ## Security Notes
 
-- All credential and token handling is encapsulated in `auth.sh` — never use raw curl with credentials or tokens
-- Credentials are read from disk into memory only — never written to new files or logged
-- OAuth2 tokens are stored in `/tmp/.api_token` with owner-only permissions (0600)
-- The token file uses JSON format with expiry tracking and is overwritten on each new token
-- Error messages are sanitized — no credentials or response bodies are exposed in error output
-- Never include credentials or tokens in conversation output
+- All credential and token handling is encapsulated in `scripts/auth.sh` and `scripts/oauth.js` — never use raw curl with credentials or tokens.
+- Client_credentials: credentials are read from disk into memory only — never written to new files or logged. Tokens cached at `/tmp/.api_token` (0600), JSON with expiry.
+- User-delegated: no client secret on the machine. Tokens cached at `~/.config/1valet-plugin/tokens.json` (directory 0700, file 0600). PKCE `S256` prevents authorization code interception.
+- Error messages are sanitized — no credentials, tokens, or raw response bodies are exposed.
+- Never include credentials or tokens in conversation output.
