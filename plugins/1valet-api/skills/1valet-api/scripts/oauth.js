@@ -29,9 +29,16 @@ const SCOPES = [
     'openid',
     'profile',
     'offline_access',
+    'role',
     'public_api.user.portfolio_manager.read',
     'public_api.user.common_data.read',
 ].join(' ');
+
+// IDS (Duende 7.4.3) does not accept wildcard ports on RedirectUris, so
+// the ClaudePluginUserDelegated client registers a fixed range of loopback
+// redirect URIs. The plugin must bind one of these ports.
+const REDIRECT_PORT_START = 51000;
+const REDIRECT_PORT_END = 51010;
 
 const CACHE_DIR = path.join(os.homedir(), '.config', '1valet-plugin');
 const CACHE_FILE = path.join(CACHE_DIR, 'tokens.json');
@@ -250,15 +257,39 @@ async function runAuthCodeFlow() {
     return storeTokens(body);
 }
 
-function startLoopbackServer() {
-    return new Promise((resolve, reject) => {
+function tryListen(port) {
+    return new Promise((resolve) => {
         const server = http.createServer();
-        server.on('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-            const port = server.address().port;
-            resolve({ server, port });
-        });
+        const onError = (err) => {
+            server.removeListener('listening', onListening);
+            resolve({ server: null, port: null, error: err });
+        };
+        const onListening = () => {
+            server.removeListener('error', onError);
+            resolve({ server, port: server.address().port, error: null });
+        };
+        server.once('error', onError);
+        server.once('listening', onListening);
+        server.listen(port, '127.0.0.1');
     });
+}
+
+async function startLoopbackServer() {
+    // IDS registers a fixed port range on the ClaudePluginUserDelegated
+    // client (Duende 7.4.3 doesn't support wildcard ports). Scan in order
+    // and use the first free port; fail gracefully if all are busy.
+    const failures = [];
+    for (let port = REDIRECT_PORT_START; port <= REDIRECT_PORT_END; port++) {
+        const result = await tryListen(port);
+        if (result.server) {
+            return { server: result.server, port: result.port };
+        }
+        failures.push(`${port}: ${result.error && result.error.code ? result.error.code : 'unknown'}`);
+    }
+    throw new Error(
+        `Could not bind any loopback port in ${REDIRECT_PORT_START}-${REDIRECT_PORT_END}. ` +
+            `All ports were in use. Free one of them and retry. Details: ${failures.join(', ')}`
+    );
 }
 
 function awaitCallback(server, expectedState) {
