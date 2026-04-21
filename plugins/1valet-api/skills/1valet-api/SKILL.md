@@ -18,7 +18,7 @@ The first time you run the skill, Claude opens your default browser to `https://
 
 - OAuth2 **Authorization Code** flow with **PKCE** (RFC 7636) — no client secret on disk.
 - IDS client id: `ClaudePluginUserDelegated` (you don't need to configure this).
-- Scopes: `openid profile offline_access public_api.user.portfolio_manager.read public_api.user.common_data.read` — **read-only** in phase 1. Write endpoints require the client_credentials mode below.
+- Scopes: `openid profile offline_access role public_api.user.portfolio_manager.read public_api.user.common_data.read` — **read-only** in phase 1. Write endpoints require the client_credentials mode below.
 - Data returned is scoped by your real `BasUser` permissions (`CustomerAdministrator` or `BasUserToBuilding`), so you only see buildings you already have access to in the portal.
 - Tokens are cached at `~/.config/1valet-plugin/tokens.json` (directory `0700`, file `0600`). The refresh token rotates silently.
 - When your assignments change in the portal, the next token refresh will reflect them; deactivated users lose access at the next refresh.
@@ -192,7 +192,8 @@ When pulling data that requires iterating over buildings (e.g., bookings for all
 
 ## Troubleshooting
 
-- **Browser did not open**: the sign-in URL is printed to the terminal — copy it into any browser. If you use a non-default port (corporate firewall), set `ONEVALET_OAUTH_PORT` and ensure that port is registered on the IDS client.
+- **Browser did not open**: the sign-in URL is printed to the terminal — copy it into any browser.
+- **"Could not bind any loopback port in 51000-51010"**: the sign-in listener uses a fixed port range registered with IDS. Something else on your machine is holding all 11 ports — close whatever is using them (the error message lists the offending port codes) and retry.
 - **"Node.js not found"**: user-delegated mode requires Node.js 14+ on `PATH`. Either install Node, or provide a `credentials/.env` to use client_credentials mode.
 - **"Token exchange failed"**: usually means the IDS client has not been seeded yet on the environment you're hitting, or your 1VALET account does not have permissions. Check with your 1VALET admin.
 - **"Forbidden" on a specific building**: your user account doesn't have a permission for that building. Phase 1 user-delegated mode is read-only; write calls will also return 403.
